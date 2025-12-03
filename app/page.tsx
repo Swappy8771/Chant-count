@@ -1,78 +1,144 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export default function Home() {
-  const [recording, setRecording] = useState(false);
-  const [count, setCount] = useState(0);
   const [target, setTarget] = useState("om");
   const [status, setStatus] = useState("");
+  const [transcript, setTranscript] = useState("");
+  const [count, setCount] = useState(0);
+  const [listening, setListening] = useState(false);
 
-  const mediaRecorder = useRef<MediaRecorder | null>(null);
+  const recognitionRef = useRef<any | null>(null);
+  const shouldRestartRef = useRef(false);
 
-  const startRecording = async () => {
-    setCount(0);
-    setRecording(true);
-    setStatus("Listening…");
+  const [supportsSpeechRecognition, setSupportsSpeechRecognition] =
+    useState<boolean | null>(null);
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-    });
+  // Detect support only on the client to avoid SSR hydration mismatches
+  useEffect(() => {
+    if (typeof window === "undefined") return;
 
-    // 🔥 IMPORTANT — Whisper REQUIRES OPUS codec
-    const mime = "audio/webm; codecs=opus";
+    const SpeechRecognitionCtor =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-    if (!MediaRecorder.isTypeSupported(mime)) {
-      alert("Your browser does NOT support OPUS audio. Try Chrome.");
-      return;
+    setSupportsSpeechRecognition(!!SpeechRecognitionCtor);
+
+    if (!SpeechRecognitionCtor) {
+      setStatus("Your browser does not support speech recognition.");
     }
+  }, []);
+  useEffect(() => {
+    if (!supportsSpeechRecognition) return;
 
-    mediaRecorder.current = new MediaRecorder(stream, {
-      mimeType: mime,
-    });
+    if (count >= 108) {
+      setStatus("Completed 108 chants ✅");
+    } else if (listening) {
+      setStatus("Listening…");
+    } else if (!listening && transcript) {
+      setStatus("Stopped");
+    } else {
+      setStatus("");
+    }
+  }, [count, listening, transcript, supportsSpeechRecognition]);
 
-    mediaRecorder.current.ondataavailable = async (event) => {
-      if (event.data.size > 0) {
-        console.log("Blob type:", event.data.type); // DEBUG
-        await sendChunk(event.data);
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+        recognitionRef.current = null;
+      }
+    };
+  }, []);
+
+  const startListening = () => {
+    if (!supportsSpeechRecognition) return;
+    if (listening) return;
+
+    const SpeechRecognitionCtor =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    const recognition = new SpeechRecognitionCtor();
+    recognition.lang = "en-IN"; // adjust language as needed
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    shouldRestartRef.current = true;
+    setTranscript("");
+    setCount(0);
+
+    recognition.onstart = () => {
+      console.log("[Speech] onstart");
+      setListening(true);
+    };
+
+    recognition.onerror = (event: any) => {
+      console.error("[Speech] error:", event);
+      setStatus("Speech recognition error");
+    };
+
+    recognition.onend = () => {
+      console.log("[Speech] onend");
+      if (shouldRestartRef.current) {
+        console.log("[Speech] restarting recognition");
+        recognition.start();
+      } else {
+        setListening(false);
       }
     };
 
-    mediaRecorder.current.start(2000); // send every 1 second
+    recognition.onresult = (event: any) => {
+      console.log("[Speech] raw event:", event);
+
+      const result = event.results[event.resultIndex];
+      if (!result) return;
+
+      const segment = result[0]?.transcript ?? "";
+      const cleanedSegment = segment.trim();
+      const lowerSegment = cleanedSegment.toLowerCase();
+      const targetWord = target.trim().toLowerCase();
+
+      let segmentOccurrences = 0;
+      let words: string[] = [];
+      if (targetWord) {
+        words = lowerSegment.split(/\W+/).filter(Boolean);
+        segmentOccurrences = words.filter((w) => w === targetWord).length;
+      }
+
+      console.log("[Speech] segment transcript:", cleanedSegment);
+      console.log("[Speech] segment words:", words);
+      console.log(
+        "[Speech] target:",
+        targetWord,
+        "segmentOccurrences:",
+        segmentOccurrences,
+      );
+
+      setTranscript((prev) => `${prev} ${cleanedSegment}`.trim());
+      if (segmentOccurrences > 0) {
+        setCount((prev) => {
+          const next = Math.min(108, prev + segmentOccurrences);
+          console.log("[Speech] updated count:", next);
+          return next;
+        });
+      }
+    };
+
+    recognitionRef.current = recognition;
+    recognition.start();
   };
 
-  const stopRecording = () => {
-    setRecording(false);
-    setStatus("Stopped");
-
-    if (mediaRecorder.current) {
-      mediaRecorder.current.stop();
-      mediaRecorder.current.stream.getTracks().forEach((t) => t.stop());
-    }
-  };
-
-  const sendChunk = async (blob: Blob) => {
-    const form = new FormData();
-    form.append("audio", blob, "chunk.webm");
-    form.append("target", target);
-
-    const res = await fetch("/api/whisper", {
-      method: "POST",
-      body: form,
-    });
-
-    const data = await res.json();
-
-    console.log("Transcript:", data.transcript);
-
-    if (data.match) {
-      setCount((prev) => prev + 1);
+  const stopListening = () => {
+    shouldRestartRef.current = false;
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
     }
   };
 
   return (
     <div style={{ padding: 40, textAlign: "center" }}>
-      <h1>108 Mantra Counter (Next.js + Whisper)</h1>
+      <h1>108 Mantra Counter (Web Speech)</h1>
 
       <input
         value={target}
@@ -86,8 +152,8 @@ export default function Home() {
       </h2>
 
       <button
-        onClick={startRecording}
-        disabled={recording}
+        onClick={startListening}
+        disabled={listening || !supportsSpeechRecognition}
         style={{
           padding: "12px 25px",
           background: "green",
@@ -101,7 +167,8 @@ export default function Home() {
       </button>
 
       <button
-        onClick={stopRecording}
+        onClick={stopListening}
+        disabled={!listening}
         style={{
           padding: "12px 25px",
           background: "red",
@@ -114,6 +181,10 @@ export default function Home() {
       </button>
 
       <p style={{ marginTop: 20 }}>{status}</p>
+
+      <p style={{ marginTop: 10, fontStyle: "italic" }}>
+        Live transcript: {transcript || "(waiting for speech…)"}
+      </p>
     </div>
   );
 }

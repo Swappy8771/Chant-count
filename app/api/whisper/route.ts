@@ -1,16 +1,22 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
-import fs from "fs";
+import { toFile } from "openai/uploads";
 
 export const runtime = "nodejs";
 
-export async function POST(req: Request) {
-  // SAFE: Load API key from env file
-  const client = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY!,
-  });
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
+export async function POST(req: Request) {
   try {
+    if (!process.env.OPENAI_API_KEY) {
+      return NextResponse.json(
+        { error: "Missing OPENAI_API_KEY server environment variable" },
+        { status: 500 }
+      );
+    }
+
     const form = await req.formData();
     const file = form.get("audio") as File;
     const target = (form.get("target") as string)?.toLowerCase();
@@ -23,27 +29,49 @@ export async function POST(req: Request) {
     }
 
     if (!target) {
-      return NextResponse.json({ error: "Missing target string" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Missing target string" },
+        { status: 400 }
+      );
     }
 
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
-    const temp = `/tmp/audio_${Date.now()}.webm`;
-    fs.writeFileSync(temp, buffer);
+    let transcript = "";
+    let occurrences = 0;
 
-    const resp = await client.audio.transcriptions.create({
-      file: fs.createReadStream(temp),
-      model: "whisper-1",
-    });
+    try {
+      const resp = await client.audio.transcriptions.create({
+        file: await toFile(buffer, "audio.webm"),
+        model: "whisper-1",
+      });
 
-    fs.unlinkSync(temp);
+      transcript = (resp.text ?? "").toLowerCase();
 
-    const transcript = resp.text.toLowerCase();
+      const words = transcript.split(/\W+/).filter(Boolean);
+      const targetWord = target.toLowerCase();
+      occurrences = words.filter((w) => w === targetWord).length;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err ?? "Unknown error");
+
+      if (msg.toLowerCase().includes("invalid file format")) {
+        console.warn("Skipping chunk: invalid audio format from Whisper:", msg);
+
+        return NextResponse.json({
+          transcript: "",
+          occurrences: 0,
+          match: false,
+        });
+      }
+
+      throw err;
+    }
 
     return NextResponse.json({
       transcript,
-      match: transcript.includes(target),
+      occurrences,
+      match: occurrences > 0,
     });
   } catch (e: unknown) {
     console.error("WHISPER ERROR:", e);
